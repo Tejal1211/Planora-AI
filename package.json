@@ -1,0 +1,15 @@
+{
+  "name": "planora-ai",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Planora AI - Intelligent Event Planner (React + Express + SQLite)",
+  "scripts": {
+    "install:all": "npm install --prefix server && npm install --prefix client",
+    "dev:server": "npm run dev --prefix server",
+    "dev:client": "npm run dev --prefix client",
+    "test": "npm test --prefix server && npm test --prefix client",
+    "build": "npm run build --prefix client && npm run build --prefix server",
+    "start": "npm start --prefix server"
+  },
+  "license": "MIT"
+}
