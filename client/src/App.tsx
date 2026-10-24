@@ -37,12 +37,19 @@ export default function App() {
   const remove = async () => { if (confirm(`Delete "${event.name}" and all its data? This cannot be undone.`)) { await api.deleteEvent(event.id); setSelId(null); events.reload(); } };
   return (
     <div className="min-h-screen lg:flex">
+      {/* Skip-to-main link for keyboard and screen reader users */}
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:rounded focus:bg-emerald-900 focus:px-3 focus:py-2 focus:text-ivory-50 focus:text-sm focus:font-medium"
+      >
+        Skip to main content
+      </a>
       <nav aria-label="Main" className="border-b border-ivory-300 bg-emerald-900 text-ivory-100 lg:min-h-screen lg:w-60 lg:border-b-0 lg:p-4">
         <div className="flex items-center justify-between px-4 py-3 lg:px-2"><button onClick={() => setView('landing')} className="font-serif text-2xl font-bold">Planora <span className="text-gold-400">AI</span></button></div>
         <ul className="flex gap-1 overflow-x-auto px-2 pb-2 lg:block lg:space-y-1 lg:px-0 lg:pb-0">{TABS.map(([k, l, Icon]) => (
           <li key={k}><button onClick={() => setTab(k)} aria-current={tab === k ? 'page' : undefined} className={`flex w-full items-center gap-2 whitespace-nowrap rounded-lg px-3 py-2 text-sm ${tab === k ? 'bg-gold-400 text-emerald-900' : 'hover:bg-emerald-800'}`}><Icon className="h-4 w-4" aria-hidden />{l}</button></li>))}</ul>
       </nav>
-      <main className="flex-1 p-4 lg:p-8">
+      <main id="main-content" className="flex-1 p-4 lg:p-8">
         <header className="mb-6 flex flex-wrap items-center justify-between gap-3">
           <div><h1 className="text-3xl font-bold">{event.name}</h1><p className="text-sm text-emerald-800/70">{event.type} · {event.date} · <Badge tone="warn">Demo vendor data · estimated prices</Badge></p></div>
           <div className="no-print flex flex-wrap items-center gap-2">

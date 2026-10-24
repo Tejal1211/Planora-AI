@@ -1,3 +1,32 @@
+/**
+ * @module app
+ * @description Express application factory for Planora AI.
+ *
+ * Exports `createApp(db, opts)` which is called by `index.ts` in production
+ * and by each test with an in-memory database, ensuring all routes are
+ * tested without side effects on the filesystem.
+ *
+ * Route groups:
+ *  - GET  /api/health
+ *  - CRUD /api/events
+ *  - Read /api/events/:id/{budget,tasks,guests,vendors,vendors/match,readiness}
+ *  - CRUD /api/events/:id/{budget,tasks,guests,vendors}
+ *  - POST /api/events/:id/ai/plan  (rate-limited)
+ *  - POST /api/events/:id/simulate[/apply]
+ *  - GET  /api/events/:id/report
+ *
+ * Security middleware applied (in order):
+ *  1. helmet() — sets CSP and security headers
+ *  2. cors()   — explicit origin allow-list
+ *  3. express.json({ limit: '100kb' }) — body size cap
+ *  4. aiLimit  — 20 req/min/IP in-memory rate limiter (AI endpoint only)
+ *
+ * Error handling:
+ *  - ZodError   → 400 with field-level details
+ *  - AppError   → status from the error
+ *  - SyntaxError (bad JSON) → 400
+ *  - Unknown    → 500 (generic message; no internals leaked)
+ */
 import express, { NextFunction, Request, RequestHandler, Response } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -20,6 +49,14 @@ const RES: Record<string, { table: string; schema: ZodTypeAny }> = {
   guests: { table: 'guests', schema: guestSchema }, vendors: { table: 'vendors', schema: vendorSchema },
 };
 
+/**
+ * Creates and returns the configured Express application.
+ *
+ * @param db    - An open SQLite database (use `:memory:` in tests)
+ * @param opts  - Optional overrides for CORS origins, static file path,
+ *                environment variables, fetch function, and today's date
+ *                (the last two are used by tests to inject mocks)
+ */
 export function createApp(db: DB, opts: AppOptions = {}) {
   const env = opts.env ?? process.env;
   const today = opts.today ?? L.todayISO;

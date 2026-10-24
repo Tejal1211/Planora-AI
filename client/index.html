@@ -3,14 +3,25 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="Planora AI - intelligent planning for weddings, birthdays and community events." />
+    <meta name="description" content="Planora AI — intelligent event planning assistant for weddings, birthdays and community events. AI-powered copilot with transparent budgeting, readiness scoring and what-if simulation." />
+    <meta name="keywords" content="event planner, AI event planning, wedding planner, budget tracker, event management" />
+    <meta name="robots" content="noindex" />
+    <meta name="theme-color" content="#073624" />
+    <!-- Open Graph -->
+    <meta property="og:title" content="Planora AI — Intelligent Event Planner" />
+    <meta property="og:description" content="Plan your event with an AI copilot, transparent budgeting and a 100-point readiness score." />
+    <meta property="og:type" content="website" />
+    <!-- Favicon -->
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A8%3C/text%3E%3C/svg%3E" />
+    <!-- Fonts: preconnect first for DNS/TLS, then load -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
-    <title>Planora AI - Intelligent Event Planner</title>
+    <title>Planora AI — Intelligent Event Planner</title>
   </head>
   <body>
-    <div id="root"></div>
+    <!-- Accessible app root; React mounts here -->
+    <div id="root" role="application" aria-label="Planora AI event planner"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

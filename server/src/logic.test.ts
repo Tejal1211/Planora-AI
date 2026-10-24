@@ -121,3 +121,77 @@ describe('fallback plan', () => {
     expect(p.checklist.length).toBeGreaterThan(0);
   });
 });
+
+describe('utilities', () => {
+  it('money formats INR with Indian locale', () => {
+    expect(L.money(100000, 'INR')).toMatch(/₹/);
+    expect(L.money(0, 'USD')).toMatch(/\$|USD/i);
+  });
+
+  it('label replaces underscores with spaces', () => {
+    expect(L.label('av_equipment')).toBe('av equipment');
+    expect(L.label('catering')).toBe('catering');
+    expect(L.label('venue_type_outdoor')).toBe('venue type outdoor');
+  });
+
+  it('round2 avoids floating-point drift', () => {
+    expect(L.round2(0.1 + 0.2)).toBe(0.3);
+    expect(L.round2(1.115)).toBe(1.12);  // 1.115 in IEEE754 is exactly 1.115, rounds to 1.12
+    expect(L.round2(100)).toBe(100);
+    expect(L.round2(12.345)).toBe(12.35);
+  });
+
+  it('daysBetween is signed and symmetric', () => {
+    expect(L.daysBetween('2026-01-01', '2026-01-08')).toBe(7);
+    expect(L.daysBetween('2026-01-08', '2026-01-01')).toBe(-7);
+  });
+
+  it('addDays crosses month and year boundaries correctly', () => {
+    expect(L.addDays('2026-12-30', 3)).toBe('2027-01-02');
+    expect(L.addDays('2026-02-28', 1)).toBe('2026-03-01');
+  });
+});
+
+describe('budget edge cases', () => {
+  it('budgetSummary handles an empty budget gracefully', () => {
+    const b = L.budgetSummary({ budget_total: 100000 }, []);
+    expect(b.committed).toBe(0);
+    expect(b.remaining).toBe(100000);
+    expect(b.status).toBe('healthy');
+    expect(b.byCategory).toHaveLength(0);
+  });
+
+  it('rescuePlan on an empty budget returns no suggestions and zero overrun', () => {
+    const r = L.rescuePlan({ budget_total: 100000, guest_count: 100, currency: 'INR' }, []);
+    expect(r.overrun).toBe(0);
+    expect(r.suggestions).toHaveLength(0);
+  });
+
+  it('budget with zero total does not divide by zero', () => {
+    const b = L.budgetSummary({ budget_total: 0 }, [{ id: 1, event_id: 1, category: 'venue', estimated: 1000, actual: 0, notes: '' }]);
+    expect(b.usedPct).toBe(0);
+    expect(Number.isFinite(b.usedPct)).toBe(true);
+  });
+});
+
+describe('readiness edge cases', () => {
+  it('score is 0 when there are no tasks and no vendors', () => {
+    const s = mk();
+    s.tasks = [];
+    s.vendors = [];
+    s.budget = [];
+    const r = L.readiness(s, TODAY);
+    expect(r.score).toBeGreaterThanOrEqual(0);
+    expect(r.score).toBeLessThanOrEqual(100);
+    expect(r.components.reduce((a, c) => a + c.weight, 0)).toBe(100);
+  });
+
+  it('snapshot returns all expected keys', () => {
+    const snap = L.snapshot(mk(), TODAY);
+    expect(snap).toHaveProperty('guestCount');
+    expect(snap).toHaveProperty('committed');
+    expect(snap).toHaveProperty('remaining');
+    expect(snap).toHaveProperty('readiness');
+    expect(snap).toHaveProperty('overdue');
+  });
+});

@@ -1,3 +1,15 @@
+/**
+ * @module schemas
+ * @description Zod request-validation schemas for Planora AI.
+ *
+ * The `text()` helper is the security cornerstone: it strips HTML tags and
+ * control characters from every string field before length validation, so
+ * XSS payloads are neutralised at the boundary regardless of which route
+ * processes the input.
+ *
+ * All schemas used by routes are exported here; `app.ts` imports them
+ * centrally to ensure no route bypasses validation.
+ */
 import { z } from 'zod';
 import { parseDate, toISO } from './logic';
 

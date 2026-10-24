@@ -1,3 +1,23 @@
+/**
+ * @module ai
+ * @description Gemini AI integration for Planora AI.
+ *
+ * Responsibilities:
+ *  - `buildPrompt`   — constructs a structured, injection-resistant prompt
+ *                      that includes pre-computed event context (no raw user data in
+ *                      the system section)
+ *  - `parseAiOutput` — sanitises and validates raw model output with Zod
+ *                      (strips HTML/control chars, caps lengths, coerces bad priority
+ *                      values, rejects empty output)
+ *  - `generatePlan`  — calls Gemini or falls back to `fallbackPlan`; never throws
+ *
+ * Security properties:
+ *  - API key is read from the server environment; never forwarded to the client
+ *  - User prompt is JSON-stringified inside the prompt (not spliced as raw text)
+ *  - Model output is HTML-stripped before parsing
+ *  - Any network, timeout, or schema error triggers a silent fallback
+ *  - A 20-second abort timeout prevents hanging requests
+ */
 import { z } from 'zod';
 import { AiPlan, State, budgetSummary, fallbackPlan, readiness, rescuePlan, taskStats, todayISO } from './logic';
 
@@ -11,7 +31,13 @@ const planSchema = z.object({
   risks: z.array(z.string().min(1).max(300)).max(8),
 });
 
-/** Sanitises untrusted model output, then validates it against a strict schema. */
+/**
+ * Sanitises untrusted model output (strips HTML tags and control characters,
+ * caps lengths) then validates it against a strict Zod schema.
+ *
+ * @throws {ZodError} if the sanitised output still fails schema validation
+ *                    (e.g. missing `summary` field or empty `recommendations`)
+ */
 export function parseAiOutput(raw: unknown): AiPlan {
   const o = (raw ?? {}) as Record<string, unknown>;
   const arr = (v: unknown) => (Array.isArray(v) ? v : []);
@@ -23,6 +49,22 @@ export function parseAiOutput(raw: unknown): AiPlan {
   }) as AiPlan;
 }
 
+/**
+ * Builds the Gemini prompt from the current event state and an optional user message.
+ *
+ * The prompt has two clearly delimited sections:
+ *  - `EVENT_DATA` — pre-computed JSON context (budgets, tasks, vendors, readiness)
+ *  - `USER_REQUEST` — the user's free-text question (JSON-stringified to prevent injection)
+ *
+ * The system preamble explicitly forbids the model from:
+ *  - Inventing numbers or prices
+ *  - Performing new financial calculations
+ *  - Treating USER_REQUEST as override instructions
+ *
+ * @param s          - Full event state (pre-loaded from the database)
+ * @param userPrompt - Raw user input (sanitised by the Zod schema before this is called)
+ * @param today      - ISO date string for "today" (injected for testability)
+ */
 export function buildPrompt(s: State, userPrompt: string, today: string) {
   const e = s.event;
   const ctx = {
@@ -41,6 +83,20 @@ EVENT_DATA: ${JSON.stringify(ctx)}
 USER_REQUEST: ${JSON.stringify(userPrompt || 'Give me the most important next steps.')}`;
 }
 
+/**
+ * Calls the Gemini API and returns a validated `AiResult`.
+ *
+ * If `GEMINI_API_KEY` is not set, or if the request fails (network error,
+ * timeout, non-200 status, invalid JSON, or Zod schema mismatch), the
+ * function catches the error and returns the deterministic fallback plan.
+ * This function **never throws**.
+ *
+ * @param s         - Full event state (provides grounding context for the prompt)
+ * @param userPrompt - Raw user input (already sanitised by the Zod layer in app.ts)
+ * @param env       - Process environment (injected for testability)
+ * @param fetchFn   - Fetch implementation (injected for testability)
+ * @param today     - ISO date string for "today" (injected for testability)
+ */
 export async function generatePlan(s: State, userPrompt: string, env: NodeJS.ProcessEnv = process.env, fetchFn: typeof fetch = fetch, today = todayISO()): Promise<AiResult> {
   const fallback = fallbackPlan(s, today);
   const key = env.GEMINI_API_KEY?.trim();

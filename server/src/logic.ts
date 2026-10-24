@@ -1,6 +1,20 @@
 /**
- * Deterministic planning engine. ALL financial maths, scoring and simulation live here -
- * the AI layer never calculates money.
+ * @module logic
+ * @description Deterministic planning engine for Planora AI.
+ *
+ * ALL financial calculations, scoring, timeline generation, vendor ranking and
+ * what-if simulation live here. The AI layer receives pre-computed figures as
+ * context and NEVER recalculates money. This separation ensures every number
+ * the user sees is auditable, reproducible and test-covered.
+ *
+ * Public surface area (all exported):
+ *  - Budget:     budgetSummary, rescuePlan
+ *  - Tasks:      taskStats, withOverdue, generateTimeline
+ *  - Vendors:    scoreVendors, demoVendorsFor
+ *  - Readiness:  readiness
+ *  - Simulation: simulate, applyToState, snapshot
+ *  - AI helper:  fallbackPlan
+ *  - Utilities:  parseDate, toISO, daysBetween, addDays, todayISO, round2, label, money
  */
 import { AppError } from './errors';
 
@@ -16,15 +30,35 @@ export interface VendorRow { id: number; event_id: number; name: string; categor
 export interface State { event: EventRow; budget: BudgetRow[]; tasks: TaskRow[]; guests: GuestRow[]; vendors: VendorRow[] }
 
 /* ---------- date + number helpers ---------- */
+
+/** Milliseconds in one day — used as the base unit for all date arithmetic. */
 const DAY = 86_400_000;
+
+/** Parses an ISO date string `YYYY-MM-DD` to a UTC timestamp (ms). */
 export const parseDate = (s: string) => Date.UTC(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10));
+
+/** Converts a UTC timestamp (ms) back to an ISO date string `YYYY-MM-DD`. */
 export const toISO = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+
+/** Returns the signed number of calendar days from date `a` to date `b` (positive if b is later). */
 export const daysBetween = (a: string, b: string) => Math.round((parseDate(b) - parseDate(a)) / DAY);
+
+/** Adds `n` days to an ISO date string and returns the result as an ISO date string. */
 export const addDays = (s: string, n: number) => toISO(parseDate(s) + n * DAY);
+
+/** Returns today's date as an ISO string `YYYY-MM-DD` using UTC. */
 export const todayISO = () => new Date().toISOString().slice(0, 10);
+
+/** Rounds a number to at most 2 decimal places (avoids floating-point drift). */
 export const round2 = (n: number) => Math.round(n * 100) / 100;
+
+/** Clamps `n` to the range [a, b] (defaults: [0, 1]). */
 const clamp = (n: number, a = 0, b = 1) => Math.min(b, Math.max(a, n));
+
+/** Converts a snake_case category key to a human-readable label. */
 export const label = (c: string) => c.replace(/_/g, ' ');
+
+/** Formats a number as a locale-aware currency string using `Intl.NumberFormat`. */
 export const money = (n: number, cur = 'INR') => new Intl.NumberFormat('en-IN', { style: 'currency', currency: cur, maximumFractionDigits: 0 }).format(n);
 
 /* ---------- templates ---------- */
@@ -99,8 +133,20 @@ export const demoVendorsFor = (e: Pick<EventRow, 'type' | 'budget_total'>) => {
 };
 
 /* ---------- budget ---------- */
+
+/** A single cost-reduction suggestion produced by the Budget Rescue Engine. */
 export interface RescueSuggestion { category: string; itemId: number; current: number; cut: number; after: number; tradeoff: string }
 
+/**
+ * Computes a comprehensive budget summary for a single event.
+ *
+ * - `committed` = actual spend when actual > 0, otherwise estimated (not yet paid)
+ * - `remaining` = budget_total − committed
+ * - `status` = 'healthy' (≤90%), 'warning' (90–100%), or 'over' (>100%)
+ * - `byCategory` = per-category rollup for charting
+ *
+ * @pure — reads only; never writes to the database.
+ */
 export function budgetSummary(e: Pick<EventRow, 'budget_total'>, items: BudgetRow[]) {
   const total = e.budget_total;
   const sum = (f: (i: BudgetRow) => number) => round2(items.reduce((a, i) => a + f(i), 0));
@@ -119,7 +165,18 @@ export function budgetSummary(e: Pick<EventRow, 'budget_total'>, items: BudgetRo
   return { total, estimated, actual, committed, remaining, overrun: Math.max(0, round2(-remaining)), usedPct: total ? round2(ratio * 100) : 0, status, byCategory };
 }
 
-/** Budget Rescue Engine: flexibility-weighted savings on UNPAID lines only. */
+/**
+ * Budget Rescue Engine — proposes flexibility-weighted cuts on UNPAID budget lines.
+ *
+ * Algorithm:
+ * 1. Identify the overrun amount from `budgetSummary`.
+ * 2. Collect candidate lines where `actual === 0` and `FLEX[category] > 0`.
+ * 3. Sort candidates by descending flexibility factor (decor 30% → venue 5%).
+ * 4. Greedily cut each candidate up to its flexibility cap until the overrun is covered.
+ * 5. If a shortfall remains, compute a guest-reduction estimate based on catering cost per head.
+ *
+ * @pure — reads only; never writes to the database.
+ */
 export function rescuePlan(e: Pick<EventRow, 'budget_total' | 'guest_count' | 'currency'>, items: BudgetRow[]) {
   const s = budgetSummary(e, items);
   if (s.overrun <= 0) return { overrun: 0, covered: 0, shortfall: 0, suggestions: [] as RescueSuggestion[], guestReduction: null as number | null, message: 'Budget is within limit - no rescue needed.' };
@@ -149,6 +206,16 @@ export function rescuePlan(e: Pick<EventRow, 'budget_total' | 'guest_count' | 'c
 }
 
 /* ---------- tasks / timeline ---------- */
+
+/**
+ * Computes aggregate task statistics relative to today's date.
+ *
+ * - `overdue` = not-done tasks whose `due_date` is strictly before `today`
+ * - `dueSoon` = not-done tasks due within the next 7 days
+ * - `progress` = percentage of tasks with `status === 'done'`
+ *
+ * @pure — reads only; never writes to the database.
+ */
 export function taskStats(tasks: TaskRow[], today: string) {
   const total = tasks.length;
   const done = tasks.filter((t) => t.status === 'done').length;
@@ -160,7 +227,20 @@ export function taskStats(tasks: TaskRow[], today: string) {
 }
 export const withOverdue = (tasks: TaskRow[], today: string) => tasks.map((t) => ({ ...t, overdue: t.status !== 'done' && t.due_date < today }));
 
-/** Adaptive timeline: offsets are compressed proportionally when the event is close. */
+/**
+ * Generates an adaptive task timeline for an event.
+ *
+ * Template offsets (days before the event date) are compressed proportionally
+ * when the event is close, so no task is ever scheduled in the past. If the
+ * event is further away than the longest template offset, offsets are used as-is.
+ *
+ * Extra tasks are added for:
+ * - Event type (wedding gets photographer/paperwork/attire; birthday gets cake/games;
+ *   community gets permits/volunteers/AV)
+ * - Outdoor or hybrid venues (get a weather-contingency task at −21 days)
+ *
+ * @pure — reads only; never writes to the database.
+ */
 export function generateTimeline(e: Pick<EventRow, 'type' | 'date' | 'venue_type'>, today = todayISO()) {
   const tpl: Tpl[] = [...COMMON, ...TYPE_TASKS[e.type], ...(e.venue_type !== 'indoor' ? [['Prepare weather and contingency plan', 'contingency', 21, 'medium'] as Tpl] : [])];
   const days = Math.max(daysBetween(today, e.date), 1);
@@ -173,6 +253,23 @@ export function generateTimeline(e: Pick<EventRow, 'type' | 'date' | 'venue_type
 }
 
 /* ---------- vendors ---------- */
+
+/**
+ * Scores and ranks vendors in a given category using a 100-point rubric:
+ *
+ * | Dimension     | Max pts | Formula |
+ * |---------------|---------|----------------------------------------------------|
+ * | Price fit     | 40      | Full when price ≤ budget allocation; decays linearly above |
+ * | Rating        | 25      | `(rating / 5) × 25` |
+ * | Preference fit| 20      | Keyword overlap with `event.preferences` |
+ * | Availability  | 15      | Binary — 15 if available, 0 if not |
+ *
+ * Unavailable vendors appear last, are flagged `eligible: false`, and always
+ * score 0 on availability. Their total score is still computed so organisers
+ * can see what they are missing.
+ *
+ * @pure — reads only; never writes to the database.
+ */
 export function scoreVendors(s: State, category: string) {
   const alloc = Math.max(1, s.budget.filter((b) => b.category === category).reduce((a, b) => a + b.estimated, 0) || s.event.budget_total * 0.1);
   const words = [...new Set(s.event.preferences.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 4))];
@@ -195,6 +292,20 @@ export function scoreVendors(s: State, category: string) {
 }
 
 /* ---------- readiness ---------- */
+
+/**
+ * Computes a transparent, 100-point event readiness score.
+ *
+ * Components (weights must sum to 100):
+ * - Budget health (30): full at ≤90% committed spend; 0 at ≥130%
+ * - Task progress  (30): done-share minus 0.5× overdue-share
+ * - Vendor status  (25): fraction of essential categories with an available, selected vendor
+ * - Contingency    (15): average of buffer score, backup plan flag, and backup-vendor fraction
+ *
+ * The `nextActions` array lists up to 3 most-impactful improvement suggestions.
+ *
+ * @pure — reads only; never writes to the database.
+ */
 export function readiness(s: State, today = todayISO()) {
   const e = s.event;
   const b = budgetSummary(e, s.budget);
@@ -227,18 +338,40 @@ export function readiness(s: State, today = todayISO()) {
 }
 
 /* ---------- what-if simulation ---------- */
+
+/**
+ * A single atomic change produced by a scenario simulation.
+ * The `kind` discriminant determines which fields are present.
+ */
 export type Change = { label: string } & (
   | { kind: 'budget_update'; id: number; estimated: number }
   | { kind: 'budget_add'; category: string; estimated: number; notes: string }
   | { kind: 'task_add'; title: string; category: string; due_date: string; priority: Priority }
   | { kind: 'event_update'; guest_count?: number; has_backup_plan?: number }
   | { kind: 'vendor_update'; id: number; price?: number; available?: number; selected?: number });
+
+/**
+ * A what-if scenario to simulate. Four types are supported:
+ * - `cost_increase` — raises estimated amounts by a percentage (optionally scoped to a category)
+ * - `add_guests`    — scales guest-driven budget lines and adds capacity-check tasks
+ * - `vendor_unavailable` — marks a vendor unavailable and finds the best replacement
+ * - `weather`       — adds contingency budget and tasks for outdoor/hybrid events
+ */
 export type Scenario =
   | { type: 'cost_increase'; percent: number; category?: string }
   | { type: 'add_guests'; count: number }
   | { type: 'vendor_unavailable'; vendorId: number }
   | { type: 'weather' };
 
+/**
+ * Computes the full set of `Change` objects that a scenario would produce,
+ * without mutating the input state. Callers should pass the result to
+ * `applyToState` (in-memory preview) or the `/simulate/apply` endpoint
+ * (persisted, server-side recomputed write).
+ *
+ * @pure — reads only; never writes to the database.
+ * @throws {AppError} 404 if a `vendor_unavailable` scenario references an unknown vendor.
+ */
 export function simulate(s: State, sc: Scenario, today = todayISO()) {
   const changes: Change[] = [];
   const notes: string[] = [];
@@ -288,6 +421,13 @@ export function simulate(s: State, sc: Scenario, today = todayISO()) {
   return { title, changes, notes };
 }
 
+/**
+ * Applies a list of `Change` objects to a deep clone of `s` and returns the new state.
+ * The original state `s` is never mutated. Temporary IDs (negative integers) are used
+ * for rows that only exist in the preview and have not yet been written to the database.
+ *
+ * @pure — reads only; never writes to the database.
+ */
 export function applyToState(s: State, changes: Change[]): State {
   const n: State = structuredClone(s);
   let tmp = -1;
@@ -301,14 +441,35 @@ export function applyToState(s: State, changes: Change[]): State {
   return n;
 }
 
+/**
+ * Returns a lightweight snapshot of key metrics for a given state.
+ * Used to produce the `before` and `after` objects in a simulation result
+ * so the UI can display a clear diff without sending the full state.
+ */
 export function snapshot(s: State, today = todayISO()) {
   const b = budgetSummary(s.event, s.budget); const st = taskStats(s.tasks, today);
   return { guestCount: s.event.guest_count, committed: b.committed, remaining: b.remaining, status: b.status, readiness: readiness(s, today).score, tasks: st.total, overdue: st.overdue };
 }
 
 /* ---------- deterministic AI fallback ---------- */
+
+/** The structured plan returned by both the Gemini path and the deterministic fallback. */
 export interface AiPlan { summary: string; recommendations: string[]; checklist: { title: string; category: string; priority: Priority }[]; risks: string[] }
 
+/**
+ * Produces a rule-based `AiPlan` from the current event state.
+ *
+ * Used when:
+ * 1. No `GEMINI_API_KEY` is configured
+ * 2. The Gemini request fails or times out
+ * 3. Gemini returns output that fails schema validation
+ *
+ * The plan is deterministic: given the same state and `today`, it always
+ * produces the same output. All figures are sourced from `budgetSummary`,
+ * `readiness`, `taskStats` and `rescuePlan` — none are invented.
+ *
+ * @pure — reads only; never writes to the database.
+ */
 export function fallbackPlan(s: State, today = todayISO()): AiPlan {
   const e = s.event; const b = budgetSummary(e, s.budget); const r = readiness(s, today); const st = taskStats(s.tasks, today);
   const rp = rescuePlan(e, s.budget); const days = daysBetween(today, e.date);
