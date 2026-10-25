@@ -15,6 +15,11 @@
  *  - Simulation: simulate, applyToState, snapshot
  *  - AI helper:  fallbackPlan
  *  - Utilities:  parseDate, toISO, daysBetween, addDays, todayISO, round2, label, money
+ *
+ * Performance notes:
+ *  - `scoreVendors` results are memoised per (event.id + category + vendor list hash)
+ *    because the function is called for every category on every page render.
+ *  - All other exported functions are pure and cheap enough to run on demand.
  */
 import { AppError } from './errors';
 
@@ -270,25 +275,80 @@ export function generateTimeline(e: Pick<EventRow, 'type' | 'date' | 'venue_type
  *
  * @pure — reads only; never writes to the database.
  */
+/**
+ * Extracts unique meaningful words (≥4 chars) from a preference string.
+ * Used for preference-match scoring in `scoreVendors`.
+ *
+ * @pure — deterministic; no side effects.
+ */
+function preferenceWords(preferences: string): string[] {
+  return [...new Set(preferences.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 4))];
+}
+
+/**
+ * Simple LRU-style memo cache for `scoreVendors`.
+ * Key: `eventId|category|vendorIds` — invalidated automatically when vendors change.
+ * Capped at 64 entries to prevent unbounded memory growth.
+ */
+const scoreVendorsCache = new Map<string, ReturnType<typeof _scoreVendors>>();
+const SCORE_CACHE_MAX = 64;
+
+function _scoreVendors(s: State, category: string) {
+  const alloc = Math.max(
+    1,
+    s.budget.filter((b) => b.category === category).reduce((a, b) => a + b.estimated, 0) ||
+      s.event.budget_total * 0.1,
+  );
+  const words = preferenceWords(s.event.preferences);
+  return s.vendors
+    .filter((v) => v.category === category)
+    .map((v) => {
+      const price = round2(v.price <= alloc ? 40 : 40 * clamp(1 - (v.price - alloc) / alloc));
+      const rating = round2((v.rating / 5) * 25);
+      const text = `${v.services} ${v.notes}`.toLowerCase();
+      const hits = words.filter((w) => text.includes(w));
+      const fit = round2(words.length ? 20 * clamp(hits.length / Math.min(words.length, 3)) : 10);
+      const availability = v.available ? 15 : 0;
+      const diff = Math.round(((v.price - alloc) / alloc) * 100);
+      const reasons = [
+        diff <= 0
+          ? `Price is ${Math.abs(diff)}% within the ${label(category)} allocation`
+          : `Price is ${diff}% over the ${label(category)} allocation`,
+        `Rated ${v.rating}/5`,
+        hits.length
+          ? `Matches your preferences: ${hits.join(', ')}`
+          : words.length
+            ? 'No match with your stated preferences'
+            : 'No preferences supplied (neutral fit score)',
+        v.available ? 'Available on the event date' : 'Not available - excluded from ranking',
+      ];
+      return {
+        ...v,
+        score: Math.round(price + rating + fit + availability),
+        eligible: !!v.available,
+        breakdown: { price, rating, fit, availability },
+        reasons,
+      };
+    })
+    .sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.score - a.score);
+}
+
 export function scoreVendors(s: State, category: string) {
-  const alloc = Math.max(1, s.budget.filter((b) => b.category === category).reduce((a, b) => a + b.estimated, 0) || s.event.budget_total * 0.1);
-  const words = [...new Set(s.event.preferences.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 4))];
-  return s.vendors.filter((v) => v.category === category).map((v) => {
-    const price = round2(v.price <= alloc ? 40 : 40 * clamp(1 - (v.price - alloc) / alloc));
-    const rating = round2((v.rating / 5) * 25);
-    const text = `${v.services} ${v.notes}`.toLowerCase();
-    const hits = words.filter((w) => text.includes(w));
-    const fit = round2(words.length ? 20 * clamp(hits.length / Math.min(words.length, 3)) : 10);
-    const availability = v.available ? 15 : 0;
-    const diff = Math.round(((v.price - alloc) / alloc) * 100);
-    const reasons = [
-      diff <= 0 ? `Price is ${Math.abs(diff)}% within the ${label(category)} allocation` : `Price is ${diff}% over the ${label(category)} allocation`,
-      `Rated ${v.rating}/5`,
-      hits.length ? `Matches your preferences: ${hits.join(', ')}` : words.length ? 'No match with your stated preferences' : 'No preferences supplied (neutral fit score)',
-      v.available ? 'Available on the event date' : 'Not available - excluded from ranking',
-    ];
-    return { ...v, score: Math.round(price + rating + fit + availability), eligible: !!v.available, breakdown: { price, rating, fit, availability }, reasons };
-  }).sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.score - a.score);
+  const vendorKey = s.vendors
+    .filter((v) => v.category === category)
+    .map((v) => `${v.id}:${v.price}:${v.rating}:${v.available}:${v.selected}`)
+    .join(',');
+  const cacheKey = `${s.event.id}|${category}|${s.event.preferences}|${vendorKey}`;
+  const cached = scoreVendorsCache.get(cacheKey);
+  if (cached) return cached;
+  // Evict oldest entries when the cache is full
+  if (scoreVendorsCache.size >= SCORE_CACHE_MAX) {
+    const firstKey = scoreVendorsCache.keys().next().value;
+    if (firstKey !== undefined) scoreVendorsCache.delete(firstKey);
+  }
+  const result = _scoreVendors(s, category);
+  scoreVendorsCache.set(cacheKey, result);
+  return result;
 }
 
 /* ---------- readiness ---------- */

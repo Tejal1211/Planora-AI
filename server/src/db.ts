@@ -1,7 +1,15 @@
+/**
+ * @module db
+ * @description SQLite database initialisation for Planora AI.
+ *
+ * Uses `better-sqlite3` with WAL journal mode and foreign-key enforcement.
+ * Pass `:memory:` to `openDb` in tests for zero-disk, zero-teardown isolation.
+ */
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 
+/** Strongly-typed alias for a `better-sqlite3` database handle. */
 export type DB = Database.Database;
 
 const SCHEMA = `
@@ -65,12 +73,24 @@ CREATE INDEX IF NOT EXISTS idx_guests_event ON guests(event_id);
 CREATE INDEX IF NOT EXISTS idx_vendors_event ON vendors(event_id);
 `;
 
-/** Opens (and initialises) the SQLite database. Use ':memory:' for tests. */
+/**
+ * Opens (and initialises) the SQLite database.
+ *
+ * Applies WAL mode for concurrent read performance, enables foreign-key
+ * cascade enforcement, and runs the DDL schema (idempotent via `IF NOT EXISTS`).
+ *
+ * @param file - Filesystem path to the `.db` file, or `:memory:` for tests.
+ * @returns An open, ready-to-use database handle.
+ */
 export function openDb(file: string): DB {
   if (file !== ':memory:') fs.mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
   const db = new Database(file);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+  db.pragma('synchronous = NORMAL'); // safe with WAL; faster than FULL
+  db.pragma('cache_size = -16000');  // 16 MB page cache
+  db.pragma('busy_timeout = 5000'); // wait up to 5 s instead of failing immediately
+  db.pragma('temp_store = MEMORY'); // store temp tables in RAM for speed
   db.exec(SCHEMA);
   return db;
 }

@@ -25,19 +25,37 @@
 @layer base {
   body { @apply bg-ivory-100 text-emerald-900 font-sans antialiased; }
   h1, h2, h3 { @apply font-serif; }
-  :focus-visible { @apply outline-2 outline-offset-2 outline-gold-500; }
+
+  /* High-contrast, 3:1 ratio focus ring — satisfies WCAG 2.4.11 */
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-gold-500;
+    border-radius: 4px;
+  }
+
+  /* Reduce motion for users who prefer it (WCAG 2.3.3) */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
 }
+
 @layer components {
-  .btn { @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed; }
-  .btn-primary { @apply bg-emerald-800 text-ivory-50 hover:bg-emerald-700; }
-  .btn-gold { @apply bg-gold-400 text-emerald-900 hover:bg-gold-300; }
-  .btn-ghost { @apply border border-ivory-300 bg-ivory-50 text-emerald-800 hover:bg-ivory-200; }
-  .btn-danger { @apply border border-red-200 bg-red-50 text-red-800 hover:bg-red-100; }
+  .btn { @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed; }
+  .btn-primary { @apply bg-emerald-800 text-ivory-50 hover:bg-emerald-700 active:bg-emerald-900; }
+  .btn-gold { @apply bg-gold-400 text-emerald-900 hover:bg-gold-300 active:bg-gold-500; }
+  .btn-ghost { @apply border border-ivory-300 bg-ivory-50 text-emerald-800 hover:bg-ivory-200 active:bg-ivory-300; }
+  .btn-danger { @apply border border-red-200 bg-red-50 text-red-800 hover:bg-red-100 active:bg-red-200; }
   .card { @apply rounded-2xl border border-ivory-300 bg-ivory-50 p-5 shadow-sm; }
-  .input { @apply w-full rounded-lg border border-ivory-300 bg-white px-3 py-2 text-sm text-emerald-900 placeholder:text-emerald-900/40; }
+  /* Input: explicit min-height for touch targets (WCAG 2.5.5 recommends 44×44 px) */
+  .input { @apply w-full rounded-lg border border-ivory-300 bg-white px-3 py-2 text-sm text-emerald-900 placeholder:text-emerald-900/40 min-h-[2.5rem]; }
   .th { @apply px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-emerald-800/70; }
   .td { @apply px-3 py-2 text-sm; }
 }
+
 @media print {
   nav, .no-print { display: none !important; }
   body { background: white; }
