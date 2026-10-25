@@ -25,13 +25,36 @@ import { AppError } from './errors';
 
 export type EventType = 'wedding' | 'birthday' | 'community';
 export type VenueType = 'indoor' | 'outdoor' | 'hybrid';
-export type Priority = 'low' | 'medium' | 'high';
+export type Priority  = 'low' | 'medium' | 'high';
 
-export interface EventRow { id: number; name: string; type: EventType; date: string; location: string; venue_type: VenueType; guest_count: number; budget_total: number; currency: string; preferences: string; has_backup_plan: number; contingency_notes: string }
-export interface BudgetRow { id: number; event_id: number; category: string; estimated: number; actual: number; notes: string }
-export interface TaskRow { id: number; event_id: number; title: string; category: string; due_date: string; status: 'todo' | 'doing' | 'done'; priority: Priority }
-export interface GuestRow { id: number; event_id: number; name: string; email: string; rsvp: 'pending' | 'yes' | 'no'; dietary: string; plus_ones: number }
-export interface VendorRow { id: number; event_id: number; name: string; category: string; price: number; services: string; rating: number; available: number; selected: number; notes: string; is_demo: number }
+/** A row from the `events` table. */
+export interface EventRow {
+  id: number; name: string; type: EventType; date: string; location: string;
+  venue_type: VenueType; guest_count: number; budget_total: number; currency: string;
+  preferences: string; has_backup_plan: number; contingency_notes: string;
+}
+/** A row from the `budget_items` table. */
+export interface BudgetRow {
+  id: number; event_id: number; category: string;
+  estimated: number; actual: number; notes: string;
+}
+/** A row from the `tasks` table. */
+export interface TaskRow {
+  id: number; event_id: number; title: string; category: string;
+  due_date: string; status: 'todo' | 'doing' | 'done'; priority: Priority;
+}
+/** A row from the `guests` table. */
+export interface GuestRow {
+  id: number; event_id: number; name: string; email: string;
+  rsvp: 'pending' | 'yes' | 'no'; dietary: string; plus_ones: number;
+}
+/** A row from the `vendors` table. */
+export interface VendorRow {
+  id: number; event_id: number; name: string; category: string;
+  price: number; services: string; rating: number;
+  available: number; selected: number; notes: string; is_demo: number;
+}
+/** Aggregated state for a single event — all five tables loaded together. */
 export interface State { event: EventRow; budget: BudgetRow[]; tasks: TaskRow[]; guests: GuestRow[]; vendors: VendorRow[] }
 
 /* ---------- date + number helpers ---------- */

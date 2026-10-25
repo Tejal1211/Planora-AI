@@ -11,15 +11,20 @@
  *  - CRUD /api/events
  *  - Read /api/events/:id/{budget,tasks,guests,vendors,vendors/match,readiness}
  *  - CRUD /api/events/:id/{budget,tasks,guests,vendors}
- *  - POST /api/events/:id/ai/plan  (rate-limited)
+ *  - POST /api/events/:id/ai/plan  (rate-limited: 20 req/min/IP)
  *  - POST /api/events/:id/simulate[/apply]
  *  - GET  /api/events/:id/report
  *
  * Security middleware applied (in order):
- *  1. helmet() — sets CSP and security headers
- *  2. cors()   — explicit origin allow-list
- *  3. express.json({ limit: '100kb' }) — body size cap
- *  4. aiLimit  — 20 req/min/IP in-memory rate limiter (AI endpoint only)
+ *  1. helmet()     — comprehensive security headers (CSP, HSTS, noSniff, etc.)
+ *  2. cors()       — explicit origin allow-list, no credentials
+ *  3. json limit   — 100 KB body cap prevents large-payload DoS
+ *  4. writeLimit   — 60 req/min/IP on all mutating (POST/PUT/DELETE) endpoints
+ *  5. aiLimit      — 20 req/min/IP on the AI endpoint (nested inside writeLimit)
+ *
+ * Table-name safety:
+ *  All dynamic SQL uses the ALLOWED_TABLES Set as an explicit whitelist.
+ *  URL-segment values are validated against this set before any DB query.
  *
  * Error handling:
  *  - ZodError   → 400 with field-level details
@@ -69,11 +74,18 @@ export interface AppOptions {
   today?: () => string;
 }
 
-/** Map from URL segment to child-resource metadata. */
-interface ResourceMeta {
-  table: string;
-  schema: ZodTypeAny;
-}
+/** Explicit whitelist of database table names that may be used in dynamic SQL. */
+const ALLOWED_TABLES = new Set(['budget_items', 'tasks', 'guests', 'vendors'] as const);
+
+/** Maps URL segment → { table, schema }. Tables are validated via ALLOWED_TABLES before use. */
+const RES = {
+  budget: { table: 'budget_items', schema: budgetSchema  as ZodTypeAny },
+  tasks:  { table: 'tasks',        schema: taskSchema    as ZodTypeAny },
+  guests: { table: 'guests',       schema: guestSchema   as ZodTypeAny },
+  vendors:{ table: 'vendors',      schema: vendorSchema  as ZodTypeAny },
+} as const satisfies Record<string, { table: string; schema: ZodTypeAny }>;
+
+type ResKey = keyof typeof RES;
 
 // ---------------------------------------------------------------------------
 // Route helpers
@@ -81,14 +93,12 @@ interface ResourceMeta {
 
 /**
  * Wraps an async route handler so that any thrown error is forwarded to
- * Express's next() for centralised handling.
+ * Express's `next()` for centralised handling. Prevents unhandled promise rejections.
  */
 const h =
   (fn: (req: Request, res: Response) => unknown): RequestHandler =>
   (req, res, next) => {
-    Promise.resolve()
-      .then(() => fn(req, res))
-      .catch(next);
+    Promise.resolve().then(() => fn(req, res)).catch(next);
   };
 
 /**
@@ -100,36 +110,6 @@ const pid = (v: string): number => {
   if (!Number.isInteger(n) || n < 1) throw new AppError(400, 'Invalid id');
   return n;
 };
-
-/** Resource registry — maps URL segment names to their DB table and Zod schema. */
-const RES: Record<string, ResourceMeta> = {
-  budget: { table: 'budget_items', schema: budgetSchema },
-  tasks: { table: 'tasks', schema: taskSchema },
-  guests: { table: 'guests', schema: guestSchema },
-  vendors: { table: 'vendors', schema: vendorSchema },
-};
-
-// ---------------------------------------------------------------------------
-// Rate limiter
-// ---------------------------------------------------------------------------
-
-/**
- * Creates a lightweight in-memory rate limiter that allows at most `limit`
- * requests per `windowMs` milliseconds per IP address.
- */
-function createRateLimiter(limit: number, windowMs: number): RequestHandler {
-  const hits = new Map<string, number[]>();
-  return (req, _res, next) => {
-    const now = Date.now();
-    const key = req.ip ?? 'unknown';
-    const recent = (hits.get(key) ?? []).filter((t) => now - t < windowMs);
-    if (recent.length >= limit) {
-      return next(new AppError(429, 'Too many AI requests - try again in a minute'));
-    }
-    hits.set(key, [...recent, now]);
-    next();
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Application factory
@@ -148,38 +128,77 @@ export function createApp(db: DB, opts: AppOptions = {}) {
   const today = opts.today ?? L.todayISO;
   const app = express();
 
-  // Disable fingerprinting header
+  // ── Security: disable server fingerprinting ─────────────────────────────
   app.disable('x-powered-by');
 
-  // Security headers
+  // ── Security: comprehensive HTTP security headers via helmet ─────────────
+  // CSP restricts resource loading; additional directives prevent clickjacking,
+  // MIME sniffing, and cross-origin data leaks.
   app.use(
     helmet({
       contentSecurityPolicy: {
         directives: {
-          defaultSrc: ["'self'"],
-          scriptSrc: ["'self'"],
-          styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
-          fontSrc: ["'self'", 'https://fonts.gstatic.com'],
-          imgSrc: ["'self'", 'data:'],
-          connectSrc: ["'self'"],
+          defaultSrc:     ["'self'"],
+          scriptSrc:      ["'self'"],
+          styleSrc:       ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+          fontSrc:        ["'self'", 'https://fonts.gstatic.com'],
+          imgSrc:         ["'self'", 'data:'],
+          connectSrc:     ["'self'"],
+          formAction:     ["'self'"],
+          baseUri:        ["'self'"],
+          objectSrc:      ["'none'"],
+          frameAncestors: ["'none'"],
+          upgradeInsecureRequests: [],
         },
       },
+      crossOriginEmbedderPolicy: false, // keep for SPA asset compatibility
+      hsts: { maxAge: 31_536_000, includeSubDomains: true },
+      referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
     }),
   );
 
-  // CORS — explicit origin allow-list
-  app.use(cors({ origin: opts.corsOrigins?.length ? opts.corsOrigins : ['http://localhost:5173'] }));
+  // ── Security: explicit CORS origin allow-list ───────────────────────────
+  app.use(
+    cors({
+      origin: opts.corsOrigins?.length ? opts.corsOrigins : ['http://localhost:5173'],
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+      allowedHeaders: ['Content-Type'],
+      credentials: false,
+    }),
+  );
 
-  // Body parsing — 100 KB cap prevents oversized payload attacks
+  // ── Security: body size cap (100 KB) prevents large-payload DoS ─────────
   app.use(express.json({ limit: '100kb' }));
 
-  // Rate limiter: 20 requests per minute per IP for AI endpoint
-  const aiLimit = createRateLimiter(20, 60_000);
+  // ── Security: in-memory rate limiters ───────────────────────────────────
+  // Shared data structure — one per limiter instance, cleared of stale entries each call.
+  const makeRateLimiter = (maxHits: number, windowMs: number, message: string): RequestHandler => {
+    const hits = new Map<string, number[]>();
+    return (req, _res, next) => {
+      const now = Date.now();
+      const key = req.ip ?? 'anon';
+      const recent = (hits.get(key) ?? []).filter((t) => now - t < windowMs);
+      if (recent.length >= maxHits) return void next(new AppError(429, message));
+      hits.set(key, [...recent, now]);
+      next();
+    };
+  };
 
-  // ---------------------------------------------------------------------------
-  // Health
-  // ---------------------------------------------------------------------------
+  /** 60 requests/min — applied to all mutating (POST/PUT/DELETE) routes. */
+  const writeLimit = makeRateLimiter(60, 60_000, 'Too many requests - please slow down');
 
+  /** 20 requests/min — applied to the expensive AI endpoint only. */
+  const aiLimit = makeRateLimiter(20, 60_000, 'Too many AI requests - try again in a minute');
+
+  // Apply write-rate limit globally to all mutating methods
+  app.use((req, res, next) => {
+    if (req.method === 'POST' || req.method === 'PUT' || req.method === 'DELETE') {
+      return writeLimit(req, res, next);
+    }
+    next();
+  });
+
+  // ── Health check ─────────────────────────────────────────────────────────
   app.get('/api/health', (_req, res) =>
     res.json({
       status: 'ok',
@@ -188,10 +207,7 @@ export function createApp(db: DB, opts: AppOptions = {}) {
     }),
   );
 
-  // ---------------------------------------------------------------------------
-  // Events CRUD
-  // ---------------------------------------------------------------------------
-
+  // ── Events CRUD ──────────────────────────────────────────────────────────
   app.get('/api/events', h((_q, res) =>
     res.json({ events: db.prepare('SELECT * FROM events ORDER BY date').all() }),
   ));
@@ -212,15 +228,13 @@ export function createApp(db: DB, opts: AppOptions = {}) {
     db.transaction(() => {
       const cols = Object.keys(data);
       if (cols.length) {
+        const values = cols.map((c) => {
+          const v = (data as Record<string, unknown>)[c];
+          return typeof v === 'boolean' ? Number(v) : v;
+        });
         db.prepare(
           `UPDATE events SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`,
-        ).run(
-          ...(cols.map((c) => {
-            const v = (data as Record<string, unknown>)[c];
-            return typeof v === 'boolean' ? Number(v) : v;
-          }) as never[]),
-          id,
-        );
+        ).run(...(values as never[]), id);
       }
       if (data.date && data.date !== old.date) syncTimeline(db, id, today());
     })();
@@ -233,10 +247,7 @@ export function createApp(db: DB, opts: AppOptions = {}) {
     res.status(204).end();
   }));
 
-  // ---------------------------------------------------------------------------
-  // Read models (computed views)
-  // ---------------------------------------------------------------------------
-
+  // ── Read models (computed views) ─────────────────────────────────────────
   app.get('/api/events/:id/budget', h((req, res) => {
     const s = loadState(db, pid(req.params.id));
     res.json({
@@ -263,16 +274,16 @@ export function createApp(db: DB, opts: AppOptions = {}) {
 
   app.get('/api/events/:id/guests', h((req, res) => {
     const s = loadState(db, pid(req.params.id));
-    const countByRsvp = (r: string) => s.guests.filter((g) => g.rsvp === r).length;
+    const byRsvp = (r: string) => s.guests.filter((g) => g.rsvp === r).length;
     const headcount = (r: string) =>
       s.guests.filter((g) => g.rsvp === r).reduce((a, g) => a + 1 + g.plus_ones, 0);
     res.json({
       guests: s.guests,
       summary: {
         total: s.guests.length,
-        yes: countByRsvp('yes'),
-        no: countByRsvp('no'),
-        pending: countByRsvp('pending'),
+        yes: byRsvp('yes'),
+        no: byRsvp('no'),
+        pending: byRsvp('pending'),
         confirmedHeadcount: headcount('yes'),
         expectedHeadcount: headcount('yes') + headcount('pending'),
         plannedGuestCount: s.event.guest_count,
@@ -300,28 +311,26 @@ export function createApp(db: DB, opts: AppOptions = {}) {
     res.json(L.readiness(loadState(db, pid(req.params.id)), today())),
   ));
 
-  // ---------------------------------------------------------------------------
-  // Generic child-resource CRUD (budget | tasks | guests | vendors)
-  // Route pattern must come AFTER specific routes (vendors/match, timeline/regenerate).
-  // ---------------------------------------------------------------------------
-
+  // ── Generic child-resource CRUD (budget | tasks | guests | vendors) ──────
+  // Pattern must come AFTER the specific routes above (vendors/match, timeline/regenerate).
   const base = '/api/events/:id/:res(budget|tasks|guests|vendors)';
 
   app.post(base, h((req, res) => {
     const id = pid(req.params.id);
     getEvent(db, id);
-    const { table, schema } = RES[req.params.res];
+    const resource = req.params.res as ResKey;
+    const { table, schema } = RES[resource];
+    // Safety: table name must be in the explicit allow-list — never user-controlled.
+    if (!ALLOWED_TABLES.has(table as never)) throw new AppError(400, 'Invalid resource');
     const data = schema.parse(req.body) as Record<string, unknown>;
     if (table === 'vendors' && data.selected && !data.available) {
       throw new AppError(400, 'Cannot select an unavailable vendor');
     }
     const rid = insertRow(db, table, id, data);
     if (table === 'vendors' && data.selected) {
-      db.prepare('UPDATE vendors SET selected = 0 WHERE event_id = ? AND category = ? AND id != ?').run(
-        id,
-        data.category,
-        rid,
-      );
+      db.prepare(
+        'UPDATE vendors SET selected = 0 WHERE event_id = ? AND category = ? AND id != ?',
+      ).run(id, data.category, rid);
     }
     res.status(201).json({ id: rid });
   }));
@@ -330,11 +339,12 @@ export function createApp(db: DB, opts: AppOptions = {}) {
     const id = pid(req.params.id);
     const rid = pid(req.params.rid);
     getEvent(db, id);
-    const { table, schema } = RES[req.params.res];
-    const data = (schema as unknown as { partial(): ZodTypeAny }).partial().parse(req.body) as Record<
-      string,
-      unknown
-    >;
+    const resource = req.params.res as ResKey;
+    const { table, schema } = RES[resource];
+    if (!ALLOWED_TABLES.has(table as never)) throw new AppError(400, 'Invalid resource');
+    const data = (schema as unknown as { partial(): ZodTypeAny })
+      .partial()
+      .parse(req.body) as Record<string, unknown>;
     if (table === 'vendors') {
       const cur = db
         .prepare('SELECT * FROM vendors WHERE id = ? AND event_id = ?')
@@ -345,11 +355,9 @@ export function createApp(db: DB, opts: AppOptions = {}) {
       if (data.available === false) data.selected = false;
       updateRow(db, table, id, rid, data);
       if (data.selected) {
-        db.prepare('UPDATE vendors SET selected = 0 WHERE event_id = ? AND category = ? AND id != ?').run(
-          id,
-          cur.category,
-          rid,
-        );
+        db.prepare(
+          'UPDATE vendors SET selected = 0 WHERE event_id = ? AND category = ? AND id != ?',
+        ).run(id, cur.category, rid);
       }
     } else {
       updateRow(db, table, id, rid, data);
@@ -360,30 +368,40 @@ export function createApp(db: DB, opts: AppOptions = {}) {
   app.delete(`${base}/:rid`, h((req, res) => {
     const id = pid(req.params.id);
     getEvent(db, id);
+    const resource = req.params.res as ResKey;
+    const { table } = RES[resource];
+    if (!ALLOWED_TABLES.has(table as never)) throw new AppError(400, 'Invalid resource');
     const r = db
-      .prepare(`DELETE FROM ${RES[req.params.res].table} WHERE id = ? AND event_id = ?`)
+      .prepare(`DELETE FROM ${table} WHERE id = ? AND event_id = ?`)
       .run(pid(req.params.rid), id);
     if (!r.changes) throw new AppError(404, 'Record not found');
     res.status(204).end();
   }));
 
-  // ---------------------------------------------------------------------------
-  // AI, simulation and report
-  // ---------------------------------------------------------------------------
-
+  // ── AI plan (rate-limited) ───────────────────────────────────────────────
   app.post('/api/events/:id/ai/plan', aiLimit, h(async (req, res) => {
     const { prompt } = aiRequestSchema.parse(req.body ?? {});
     res.json(
-      await generatePlan(loadState(db, pid(req.params.id)), prompt, env, opts.fetchFn ?? fetch, today()),
+      await generatePlan(
+        loadState(db, pid(req.params.id)),
+        prompt,
+        env,
+        opts.fetchFn ?? fetch,
+        today(),
+      ),
     );
   }));
 
+  // ── Simulation ───────────────────────────────────────────────────────────
+
   /**
-   * Computes and returns a simulation preview (no writes to DB).
-   * Extracted as a local function so the apply endpoint can reuse it
-   * without trusting any client-supplied change list.
+   * Builds a simulation preview from a scenario body.
+   * Always recomputes server-side — client-supplied change lists are NEVER trusted.
+   *
+   * @param id   - Validated event primary key
+   * @param body - Raw (unvalidated) request body; validated inside via scenarioSchema
    */
-  const computePreview = (id: number, body: unknown) => {
+  const buildPreview = (id: number, body: unknown) => {
     const sc = scenarioSchema.parse(body);
     const s = loadState(db, id);
     const t = today();
@@ -404,65 +422,57 @@ export function createApp(db: DB, opts: AppOptions = {}) {
   };
 
   app.post('/api/events/:id/simulate', h((req, res) =>
-    res.json(computePreview(pid(req.params.id), req.body).result),
+    res.json(buildPreview(pid(req.params.id), req.body).result),
   ));
 
   app.post('/api/events/:id/simulate/apply', h((req, res) => {
     const id = pid(req.params.id);
-    // Recomputed server-side — client-supplied change lists are never trusted
-    const { sim, result } = computePreview(id, req.body);
+    const { sim, result } = buildPreview(id, req.body);
     if (!sim.changes.length) throw new AppError(400, 'This scenario produces no changes to apply');
     applyChangesDb(db, id, sim.changes);
     res.json({ applied: sim.changes.length, result });
   }));
 
+  // ── Report ───────────────────────────────────────────────────────────────
   app.get('/api/events/:id/report', h((req, res) => {
     const s = loadState(db, pid(req.params.id));
     const t = today();
     const guestStats = {
-      total: s.guests.length,
-      yes: s.guests.filter((g) => g.rsvp === 'yes').length,
-      no: s.guests.filter((g) => g.rsvp === 'no').length,
+      total:   s.guests.length,
+      yes:     s.guests.filter((g) => g.rsvp === 'yes').length,
+      no:      s.guests.filter((g) => g.rsvp === 'no').length,
       pending: s.guests.filter((g) => g.rsvp === 'pending').length,
     };
     res.json({
       generatedAt: new Date().toISOString(),
       event: s.event,
       budget: {
-        items: s.budget,
+        items:   s.budget,
         summary: L.budgetSummary(s.event, s.budget),
-        rescue: L.rescuePlan(s.event, s.budget),
+        rescue:  L.rescuePlan(s.event, s.budget),
       },
-      readiness: L.readiness(s, t),
-      tasks: L.withOverdue(s.tasks, t),
-      taskStats: L.taskStats(s.tasks, t),
-      guests: guestStats,
-      selectedVendors: s.vendors.filter((v) => v.selected),
+      readiness:         L.readiness(s, t),
+      tasks:             L.withOverdue(s.tasks, t),
+      taskStats:         L.taskStats(s.tasks, t),
+      guests:            guestStats,
+      selectedVendors:   s.vendors.filter((v) => v.selected),
       disclaimer:
         'Vendors marked demo are demonstration data and all prices are estimates, not quotes.',
     });
   }));
 
-  // ---------------------------------------------------------------------------
-  // 404 catch-all for unmatched API routes
-  // ---------------------------------------------------------------------------
-
+  // ── 404 catch-all for unmatched /api routes ──────────────────────────────
   app.use('/api', (_req, _res, next) => next(new AppError(404, 'Route not found')));
 
-  // ---------------------------------------------------------------------------
-  // Static client serving (production)
-  // ---------------------------------------------------------------------------
-
+  // ── Static client serving (production) ───────────────────────────────────
   const dist = opts.clientDist;
   if (dist && fs.existsSync(path.join(dist, 'index.html'))) {
     app.use(express.static(dist));
     app.get('*', (_req, res) => res.sendFile(path.resolve(dist, 'index.html')));
   }
 
-  // ---------------------------------------------------------------------------
-  // Global error handler
-  // ---------------------------------------------------------------------------
-
+  // ── Global error handler ─────────────────────────────────────────────────
+  // Rule: never expose stack traces or internal details to clients.
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof ZodError) {
       return res.status(400).json({
