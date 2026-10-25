@@ -4,7 +4,6 @@
 
 **Tech stack:** React 18 + TypeScript + Vite + Tailwind CSS + Recharts (frontend) · Express 4 + TypeScript + SQLite (backend) · Gemini AI with deterministic fallback · Vitest (46 passing tests)
 
----
 
 ## Quick Start
 
